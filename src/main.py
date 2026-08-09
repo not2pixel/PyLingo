@@ -848,17 +848,25 @@ def _goals_headers(jwt, sub):
         "x-amzn-trace-id": f"User={sub}",
     }
 
+def _goals_timezone():
+    """IANA 时区名(如 Asia/Shanghai),取不到时退回 UTC±HH:MM 偏移。"""
+    tz_name = (os.environ.get("TZ") or "").strip()
+    if "/" in tz_name or tz_name.upper() == "UTC":
+        return tz_name
+    try:
+        offset = -(time.altzone if time.daylight and time.localtime().tm_isdst else time.timezone) // 60
+        sign = "+" if offset >= 0 else "-"
+        return f"UTC{sign}{abs(offset)//60:02d}:{abs(offset)%60:02d}"
+    except Exception:
+        return "UTC"
+
+def _goals_timestamp():
+    """goals-api 只接受带 UTC 标识的 ISO-8601,例如 2026-08-09T10:49:49.703Z。"""
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
 def _get_quest_schema(jwt, sub):
     headers = _goals_headers(jwt, sub)
-    tz ="UTC"
-    try:
-        import time as _t
-        tz_offset = -(_t.timezone if _t.daylight == 0 else _t.altzone) // 60
-        sign ="+" if tz_offset >= 0 else"-"
-        tz = f"UTC{sign}{abs(tz_offset)//60:02d}:{abs(tz_offset)%60:02d}"
-    except:
-        pass
-    status, data = duo_get(f"/schema?ui_language=en&_={int(time.time()*1000)}", jwt, sub)
     # goals-api is a different host — use http_request directly
     status, text = http_request("GET","goals-api.duolingo.com",
                                 f"/schema?ui_language=en&_={int(time.time()*1000)}",
@@ -870,14 +878,8 @@ def _get_quest_schema(jwt, sub):
 
 def _get_quest_progress(jwt, sub):
     headers = _goals_headers(jwt, sub)
-    try:
-        import time as _t
-        tz_offset = -(_t.timezone if _t.daylight == 0 else _t.altzone) // 60
-        sign ="+" if tz_offset >= 0 else"-"
-        tz = f"UTC{sign}{abs(tz_offset)//60:02d}:{abs(tz_offset)%60:02d}"
-    except:
-        tz ="UTC"
-    path = f"/users/{sub}/progress?timezone={urllib.parse.quote(tz)}&ui_language=en"
+    path = (f"/users/{sub}/progress"
+            f"?timezone={urllib.parse.quote(_goals_timezone())}&ui_language=en")
     status, text = http_request("GET","goals-api.duolingo.com", path, headers)
     try:
         return json.loads(text)
@@ -887,25 +889,29 @@ def _get_quest_progress(jwt, sub):
 def _brute_force_quests(jwt, sub, metrics):
     """POST /users/{id}/progress/batch with quantity=2000 for each metric."""
     headers = _goals_headers(jwt, sub)
-    try:
-        tz_offset = -(time.timezone if time.daylight == 0 else time.altzone) // 60
-        sign ="+" if tz_offset >= 0 else"-"
-        tz = f"UTC{sign}{abs(tz_offset)//60:02d}:{abs(tz_offset)%60:02d}"
-    except:
-        tz ="UTC"
     updates = [{"metric": m,"quantity": 2000} for m in metrics]
     updates.append({"metric":"QUESTS","quantity": 1})
     payload = {
         "metric_updates": updates,
-        "timezone": tz,
-        "timestamp": datetime.now().isoformat(),
+        "timezone": _goals_timezone(),
+        "timestamp": _goals_timestamp(),
     }
-    status, text = http_request(
-        "POST","goals-api.duolingo.com",
-        f"/users/{sub}/progress/batch",
-        headers, payload
-    )
-    return status in (200, 201)
+    ok = False
+    # 调用两次:第一次写进度,第二次触发奖章结算(Duolingo 行为)
+    for i in range(2):
+        if i:
+            time.sleep(0.8)
+            payload["timestamp"] = _goals_timestamp()
+        status, text = http_request(
+            "POST","goals-api.duolingo.com",
+            f"/users/{sub}/progress/batch",
+            headers, payload
+        )
+        ok = status in (200, 201)
+        if not ok:
+            log(f"batch HTTP {status}: {str(text)[:160]}","error")
+            break
+    return ok
 
 def auto_daily_quest(jwt, sub, user_info):
     """Complete all pending daily quests in one batch call.
