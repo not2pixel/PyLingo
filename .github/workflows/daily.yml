@@ -1,0 +1,41 @@
+name: Duolingo Daily
+
+on:
+  schedule:
+    # UTC 01:00 = 北京时间 09:00
+    - cron: "0 1 * * *"
+    # UTC 13:00 = 北京时间 21:00,作为当日补跑
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: duolingo-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: ${{ vars.TZ || 'Asia/Shanghai' }}
+      DELAY_MS: ${{ vars.DELAY_MS || '1500' }}
+      MAX_RETRY: ${{ vars.MAX_RETRY || '3' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: src/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r src/requirements.txt
+
+      - name: Run daily quests & keep streak
+        env:
+          DUOLINGO_JWT: ${{ secrets.DUOLINGO_JWT }}
+        run: python src/daily.py

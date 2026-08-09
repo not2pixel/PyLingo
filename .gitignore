@@ -1,0 +1,20 @@
+# 本地配置与凭据
+.env
+.env.local
+!.env.example
+
+# 运行时生成的账号与配置
+accounts.json
+config.json
+src/accounts.json
+src/config.json
+
+# Launcher 缓存(内含 accounts.json 等凭据)
+.DuoHacker-Python_cache/
+.pylingo_cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
