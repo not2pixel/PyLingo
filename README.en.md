@@ -48,7 +48,7 @@ No manual `pip install` needed. The launcher handles everything.
 ### Recommended — always use the Launcher
 
 ```bash
-python Launcher.py
+python Launcher/Launcher.py
 ```
 
 The launcher fetches the latest `main.py` and `requirements.txt` from GitHub, installs any new dependencies, caches locally, then runs. You always get the most recent version automatically.
@@ -56,14 +56,15 @@ The launcher fetches the latest `main.py` and `requirements.txt` from GitHub, in
 ### Run directly (skip update check)
 
 ```bash
-python main.py
+pip install -r src/requirements.txt
+python src/main.py
 ```
 
 ---
 
 ## Launcher
 
-`Launcher.py` is a zero-dependency auto-updater (pure Python stdlib). Every launch fetches the latest script and requirements from GitHub.
+`Launcher/Launcher.py` is a zero-dependency auto-updater (pure Python stdlib). Every launch fetches the latest script and requirements from GitHub.
 
 ```
   DuoHacker-Python Launcher  v1.0.0
@@ -77,7 +78,7 @@ python main.py
 ### Launcher options
 
 ```
-python Launcher.py [options]
+python Launcher/Launcher.py [options]
 
   --offline    Run from cache, skip update and dependency check
   --help       Show this help
@@ -87,14 +88,18 @@ python Launcher.py [options]
 
 ```
 DuoHacker-Python/
-├── Launcher.py
-├── main.py
-├── accounts.json          ← created on first account add
-├── config.json            ← created on first settings change
-└── .DuoHacker-Python_cache/
-    ├── DuoHacker-Python.py         ← cached script from GitHub
-    ├── requirements.txt   ← cached requirements from GitHub
-    └── meta.json          ← version, hash, timestamps
+├── Launcher/
+│   ├── Launcher.py
+│   └── .pylingo_cache/         ← launcher cache (gitignored)
+│       ├── pylingo.py          ← cached script from GitHub
+│       ├── requirements.txt    ← cached requirements from GitHub
+│       ├── meta.json           ← version, hash, timestamps
+│       ├── accounts.json       ← created on first account add
+│       └── config.json         ← created on first settings change
+└── src/
+    ├── main.py
+    ├── daily.py
+    └── requirements.txt
 ```
 
 ---

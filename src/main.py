@@ -344,16 +344,46 @@ def extract_skill_id(current_course):
         pass
     return None
 
+def _account_tz(streak_data=None):
+    """账号所在时区,依次取 streakData.updatedTimeZone、TZ 环境变量,最后退回本地时区。"""
+    names = [(streak_data or {}).get("updatedTimeZone"), os.environ.get("TZ")]
+    for name in names:
+        if not name:
+            continue
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(str(name).strip())
+        except Exception:
+            continue
+    return datetime.now().astimezone().tzinfo
+
 def streak_done_today(streak_data):
+    """连胜是否已在账号本地“今天”完成。
+
+    Duolingo 以账号时区判定当日,用 UTC 比较会让东八区凌晨误判为已完成。
+    """
     try:
-        upd = streak_data.get("updatedAt") or streak_data.get("currentStreak", {}).get("endDate")
-        if not upd: return False
+        tz = _account_tz(streak_data)
+        today = datetime.now(tz=tz).date()
+        cur = streak_data.get("currentStreak") or {}
+
+        # endDate / lastExtendedDate 已是账号本地日期,优先使用
+        for key in ("lastExtendedDate","endDate"):
+            val = cur.get(key)
+            if isinstance(val, str) and val.strip():
+                return datetime.fromisoformat(val.strip().split("T")[0]).date() >= today
+
+        upd = streak_data.get("updatedTimestamp") or streak_data.get("updatedAt")
+        if not upd:
+            return False
         if isinstance(upd, (int, float)):
-            upd_dt = datetime.fromtimestamp(upd/1000, tz=timezone.utc)
+            secs = upd / 1000 if upd > 1e11 else upd
+            upd_dt = datetime.fromtimestamp(secs, tz=timezone.utc)
         else:
             upd_dt = datetime.fromisoformat(str(upd).replace("Z","+00:00"))
-        now = datetime.now(tz=timezone.utc)
-        return upd_dt.date() >= now.date()
+            if upd_dt.tzinfo is None:
+                upd_dt = upd_dt.replace(tzinfo=timezone.utc)
+        return upd_dt.astimezone(tz).date() >= today
     except:
         return False
 

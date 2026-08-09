@@ -9,8 +9,9 @@ config.json
 src/accounts.json
 src/config.json
 
-# Launcher 缓存
+# Launcher 缓存(内含 accounts.json 等凭据)
 .DuoHacker-Python_cache/
+.pylingo_cache/
 
 # Python
 __pycache__/

@@ -48,7 +48,7 @@ cd DuoHacker
 ### 推荐 —— 通过启动器运行
 
 ```bash
-python Launcher.py
+python Launcher/Launcher.py
 ```
 
 启动器会从 GitHub 拉取最新的 `main.py` 和 `requirements.txt`,安装新增依赖并写入本地缓存,然后运行。这样始终使用最新版本。
@@ -56,14 +56,15 @@ python Launcher.py
 ### 直接运行(跳过更新检查)
 
 ```bash
-python main.py
+pip install -r src/requirements.txt
+python src/main.py
 ```
 
 ---
 
 ## 启动器
 
-`Launcher.py` 是零依赖的自动更新器(纯标准库)。每次启动都会从 GitHub 获取最新脚本和依赖清单。
+`Launcher/Launcher.py` 是零依赖的自动更新器(纯标准库)。每次启动都会从 GitHub 获取最新脚本和依赖清单。
 
 ```
   DuoHacker-Python Launcher  v1.0.0
@@ -77,7 +78,7 @@ python main.py
 ### 启动器参数
 
 ```
-python Launcher.py [options]
+python Launcher/Launcher.py [options]
 
   --offline    使用缓存运行,跳过更新与依赖检查
   --help       显示帮助
@@ -87,14 +88,18 @@ python Launcher.py [options]
 
 ```
 DuoHacker-Python/
-├── Launcher.py
-├── main.py
-├── accounts.json          ← 添加第一个账号时创建
-├── config.json            ← 首次修改设置时创建
-└── .DuoHacker-Python_cache/
-    ├── DuoHacker-Python.py         ← 从 GitHub 缓存的脚本
-    ├── requirements.txt   ← 从 GitHub 缓存的依赖清单
-    └── meta.json          ← 版本、哈希、时间戳
+├── Launcher/
+│   ├── Launcher.py
+│   └── .pylingo_cache/         ← 启动器缓存(已被 gitignore)
+│       ├── pylingo.py          ← 从 GitHub 缓存的脚本
+│       ├── requirements.txt    ← 从 GitHub 缓存的依赖清单
+│       ├── meta.json           ← 版本、哈希、时间戳
+│       ├── accounts.json       ← 添加第一个账号时创建
+│       └── config.json         ← 首次修改设置时创建
+└── src/
+    ├── main.py
+    ├── daily.py
+    └── requirements.txt
 ```
 
 ---
