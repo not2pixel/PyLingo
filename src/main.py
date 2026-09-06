@@ -360,16 +360,19 @@ def streak_done_today(streak_data):
 # ─── Farming functions ────────────────────────────────────────────
 
 def farm_xp_once_stories(jwt, sub, user_info):
-    """Stories API — up to 499 XP per call."""
+    """Stories API — up to 499 XP per call.
+    Slug 'fr-en-le-passeport': fromLanguage='fr', learningLanguage='en' (hardcoded, not user's language).
+    happyHourBonusXp=469 matches DuoHacker V1 XP farm.
+    """
     now = int(time.time())
     dur = random.randint(300, 420)
     body = {
         "awardXp": True,
         "completedBonusChallenge": True,
-        "fromLanguage": user_info.get("fromLanguage","en"),
-        "learningLanguage": user_info.get("learningLanguage","fr"),
+        "fromLanguage": "fr",        # hardcoded — matches slug fr-en-le-passeport
+        "learningLanguage": "en",    # hardcoded — matches slug fr-en-le-passeport
         "hasXpBoost": False,
-        "illustrationFormat":"svg",
+        "illustrationFormat": "svg",
         "isFeaturedStoryInPracticeHub": True,
         "isLegendaryMode": True,
         "isV2Redo": False,
@@ -382,14 +385,21 @@ def farm_xp_once_stories(jwt, sub, user_info):
         "endTime": now + dur,
     }
     headers = make_headers(jwt, sub)
-    headers["Host"] ="stories.duolingo.com"
-    headers["Origin"] ="https://stories.duolingo.com"
-    status, _ = http_request(
-        "POST","stories.duolingo.com",
+    headers["Host"] = "stories.duolingo.com"
+    headers["Origin"] = "https://stories.duolingo.com"
+    headers["Referer"] = "https://stories.duolingo.com/"
+    status, text = http_request(
+        "POST", "stories.duolingo.com",
         "/api2/stories/fr-en-le-passeport/complete",
         headers, body
     )
-    return status
+    # Parse awardedXp from response for accurate tracking
+    try:
+        d = json.loads(text)
+        awarded = d.get("awardedXp") if isinstance(d, dict) else None
+    except Exception:
+        awarded = None
+    return status, awarded if isinstance(awarded, int) else 499
 
 def farm_xp_once_unit(jwt, sub, user_info, skill_id):
     """UNIT_TEST session — ~110 XP per call."""
@@ -437,17 +447,67 @@ def farm_xp_once_unit(jwt, sub, user_info, skill_id):
         return True, earned
     return False, 0
 
-def farm_gem_once(jwt, sub, user_info):
-    """Claim gem reward."""
-    reward_id ="SKILL_COMPLETION_BALANCED-dd2495f4_d44e_3fc3_8ac8_94e2191506f0-2-GEMS"
+def _fetch_gem_rewards(jwt, sub):
+    """Fetch unclaimed gem rewards from rewardBundles — mirrors _fetchGemRewards from DuoHacker.
+    Returns list of {id, amount} dicts, or None on error.
+    """
+    path = f"/2023-05-23/users/{sub}?fields=rewardBundles{{rewards}}"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {jwt}",
+        "Content-Type": "application/json",
+        "Cookie": f"jwt_token={jwt}",
+        "Host": "www.duolingo.com",
+        "User-Agent": random_ua(),
+    }
+    status, text = http_request("GET", "www.duolingo.com", path, headers)
+    if status != 200:
+        return None
+    try:
+        data = json.loads(text)
+        bundles = data.get("rewardBundles", [])
+        gem_rewards = []
+        for bundle in bundles:
+            for reward in bundle.get("rewards", []):
+                if reward.get("consumed"):
+                    continue
+                rid = reward.get("id", "")
+                if rid.startswith("SKILL_COMPLETION-") or rid.startswith("SKILL_COMPLETION_BALANCED-"):
+                    gem_rewards.append({"id": rid, "amount": reward.get("amount", 0)})
+        return gem_rewards
+    except Exception:
+        return None
+
+def _exploit_gem_reward(jwt, sub, user_info, reward_id):
+    """PATCH /2023-05-23/users/{sub}/rewards/{reward_id} — mirrors _exploitGemReward from DuoHacker."""
     path = f"/2023-05-23/users/{sub}/rewards/{reward_id}"
     body = {
         "consumed": True,
-        "learningLanguage": user_info.get("learningLanguage","fr"),
-        "fromLanguage": user_info.get("fromLanguage","en"),
+        "fromLanguage": user_info.get("fromLanguage", "en"),
+        "learningLanguage": user_info.get("learningLanguage", "fr"),
     }
     status, _ = duo_patch(path, jwt, sub, body)
-    return status == 200, 30 if status == 200 else 0
+    return status == 200
+
+def _get_gem_count(jwt, sub):
+    """Fetch current gem count via gemsConfig — mirrors _getGemCount from DuoHacker."""
+    path = f"/2023-05-23/users/{sub}?fields=gemsConfig"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {jwt}",
+        "Content-Type": "application/json",
+        "Cookie": f"jwt_token={jwt}",
+        "Host": "www.duolingo.com",
+        "User-Agent": random_ua(),
+    }
+    status, text = http_request("GET", "www.duolingo.com", path, headers)
+    if status != 200:
+        return None
+    try:
+        data = json.loads(text)
+        return data.get("gemsConfig", {}).get("gems")
+    except Exception:
+        return None
 
 # ─── Progress bar ─────────────────────────────────────────────────
 def progress_bar(current, total, width=30, label=""):
@@ -508,20 +568,20 @@ def farm_xp(jwt, sub, user_info, delay_ms, use_stories=True):
     while state.running:
         tick += 1
         if use_stories and consecutive_429 < MAX_429:
-            status = farm_xp_once_stories(jwt, sub, user_info)
+            status, awarded = farm_xp_once_stories(jwt, sub, user_info)
             if status == 200:
                 consecutive_429 = 0; fallback_errors = 0
-                state.xp_earned += 499; state.calls += 1
-                _xp_tick(499, tick)
+                state.xp_earned += awarded; state.calls += 1
+                _xp_tick(awarded, tick)
             elif status == 429:
                 consecutive_429 += 1
-                log(f"Stories rate-limited (429) [{consecutive_429}/{MAX_429}]","warning")
+                log(f"Stories rate-limited (429) [{consecutive_429}/{MAX_429}]", "warning")
                 if consecutive_429 >= MAX_429:
-                    log("Switching to UNIT_TEST fallback (110 XP)","info")
+                    log("Switching to UNIT_TEST fallback (110 XP)", "info")
                 time.sleep(delay_ms / 1000 * 2)
                 continue
             else:
-                log(f"Stories returned {status}, switching to UNIT_TEST","warning")
+                log(f"Stories returned {status}, switching to UNIT_TEST", "warning")
                 use_stories = False
         else:
             if not skill_id:
@@ -556,6 +616,9 @@ def _xp_tick(earned, tick):
 
 # ─── Gem Farm ─────────────────────────────────────────────────────
 def farm_gems(jwt, sub, user_info, delay_ms, batch=3):
+    """Gem farm using dynamic rewardBundles fetch — mirrors _farmGems from DuoHacker.
+    Fetches unclaimed SKILL_COMPLETION rewards, claims all in batch, verifies via gemsConfig delta.
+    """
     state.running = True
     state.start_time = time.time()
     consecutive_errors = 0
@@ -563,36 +626,62 @@ def farm_gems(jwt, sub, user_info, delay_ms, batch=3):
     tick = 0
 
     print()
-    log(f"Starting Gem farm — batch={bold(str(batch))} | delay={bold(f'{delay_ms}ms')}","farm")
+    log(f"Starting Gem farm — delay={bold(f'{delay_ms}ms')} | dynamic rewardBundles mode", "farm")
     print()
+
+    prev_gems = _get_gem_count(jwt, sub)
+    next_rewards = _fetch_gem_rewards(jwt, sub)
 
     while state.running:
         tick += 1
-        ok_count = 0
-        for _ in range(batch):
-            ok, earned = farm_gem_once(jwt, sub, user_info)
-            if ok:
-                ok_count += 1
-                state.gem_earned += earned
-            time.sleep(0.15)
+        rewards = next_rewards
 
-        if ok_count > 0:
-            consecutive_errors = 0
-            state.calls += ok_count
-            _gem_tick(ok_count * 30, tick)
-        else:
+        if rewards is None:
             consecutive_errors += 1
             state.errors += 1
             if consecutive_errors >= MAX_ERRORS:
-                log("\nToo many errors — stopping gem farm.","error")
+                log("\nToo many errors — stopping gem farm.", "error")
                 break
-            time.sleep(delay_ms / 1000 * 3)
+            time.sleep(3.0)
+            next_rewards = _fetch_gem_rewards(jwt, sub)
             continue
 
-        time.sleep(delay_ms / 1000)
+        consecutive_errors = 0
+
+        if len(rewards) == 0:
+            log("No unclaimed rewards found — waiting...", "warning")
+            time.sleep(max(0.2, delay_ms / 1000))
+            next_rewards = _fetch_gem_rewards(jwt, sub)
+            continue
+
+        # Claim all rewards
+        for r in rewards:
+            _exploit_gem_reward(jwt, sub, user_info, r["id"])
+            time.sleep(0.1)
+
+        # Verify via gem delta
+        gems_after = _get_gem_count(jwt, sub)
+        next_rewards = _fetch_gem_rewards(jwt, sub)
+
+        batch_gained = 0
+        if prev_gems is not None and gems_after is not None:
+            batch_gained = max(0, gems_after - prev_gems)
+        else:
+            batch_gained = sum(r.get("amount", 0) for r in rewards)
+
+        if gems_after is not None:
+            prev_gems = gems_after
+
+        if batch_gained > 0:
+            state.gem_earned += batch_gained
+            state.calls += 1
+            _gem_tick(batch_gained, tick)
+
+        cooldown = max(0.05, delay_ms / 1000 / 4) if delay_ms > 80 else 0.05
+        time.sleep(cooldown)
 
     state.running = False
-    _farm_summary("Gems", state.gem_earned,"")
+    _farm_summary("Gems", state.gem_earned, "")
 
 def _gem_tick(earned, tick):
     rate = state.gem_earned / max(1, time.time() - state.start_time) * 3600
@@ -636,42 +725,68 @@ _STREAK_CHALLENGE_TYPES = [
     "typeCompleteTable","writeComprehension",
 ]
 
-def _streak_session_once(jwt, sub, user_info, start_ts, end_ts):
-    """POST /2023-05-23/sessions (GLOBAL_PRACTICE) + PUT to complete.
-    Mirrors farmSessionOnce from DuoHacker userscript."""
+def _streak_session_once(jwt, sub, user_info, end_ts):
+    """POST /2017-06-30/sessions (GLOBAL_PRACTICE) + PUT to complete.
+    Mirrors _farmStreak from DuoHacker userscript exactly:
+    - Uses /2017-06-30/sessions (not /2023-05-23/)
+    - heartsLeft=5 (not 0)
+    - startTime = end_ts - 1, endTime = end_ts
+    - enableBonusPoints=False
+    """
     session_body = {
         "challengeTypes": _STREAK_CHALLENGE_TYPES,
-        "fromLanguage": user_info.get("fromLanguage","en"),
+        "fromLanguage": user_info.get("fromLanguage", "en"),
         "isFinalLevel": False,
         "isV2": True,
         "juicy": True,
-        "learningLanguage": user_info.get("learningLanguage","fr"),
+        "learningLanguage": user_info.get("learningLanguage", "fr"),
         "smartTipsVersion": 2,
-        "type":"GLOBAL_PRACTICE",
+        "type": "GLOBAL_PRACTICE",
     }
-    status, session = duo_post("/2023-05-23/sessions", jwt, sub, session_body)
+    status, session = duo_post("/2017-06-30/sessions", jwt, sub, session_body)
     if status != 200 or not session.get("id"):
         return False
 
     update_body = {
         **session,
-        "heartsLeft": 0,
-        "startTime": start_ts,
-        "enableBonusPoints": False,
+        "heartsLeft": 5,           # DuoHacker uses 5, not 0
+        "startTime": end_ts - 1,   # DuoHacker: startTime = endSecs - 1
         "endTime": end_ts,
+        "enableBonusPoints": False,
         "failed": False,
         "maxInLessonStreak": 9,
         "shouldLearnThings": True,
     }
-    status2, _ = duo_put(f"/2023-05-23/sessions/{session['id']}", jwt, sub, update_body)
+    status2, _ = duo_put(f"/2017-06-30/sessions/{session['id']}", jwt, sub, update_body)
     return status2 == 200
+
+def _tz_noon_timestamp(year, month, day):
+    """Return Unix timestamp for 12:00:00 of given date in local time (wall clock).
+    Mirrors _wallClockToSeconds(tz, year, month, day, 12, 0, 0) from DuoHacker.
+    """
+    try:
+        from datetime import datetime as _dt
+        dt = _dt(year, month, day, 12, 0, 0)
+        return int(dt.timestamp())
+    except (ValueError, OverflowError):
+        # Fallback: approximate with calendar math
+        import calendar
+        return int(calendar.timegm((year, month, day, 12, 0, 0, 0, 0, 0))) - time.timezone
+
+def _date_add_days(year, month, day, delta):
+    """Add delta days to a (year, month, day) tuple. Returns new (y, m, d)."""
+    from datetime import date, timedelta
+    d = date(year, month, day) + timedelta(days=delta)
+    return d.year, d.month, d.day
 
 def farm_streak_safe(jwt, sub, user_info, delay_ms):
     """Farm streak up to account age limit — safe mode.
-    Mirrors farmStreakSafe from DuoHacker userscript."""
+    Uses timezone-aware noon timestamps matching DuoHacker _farmStreak logic:
+    endTime = 12:00:00 of (streakStartDate - 1 - dayIdx), startTime = endTime - 1
+    """
     creation = user_info.get("creationDate")
     if not creation:
-        log("Cannot determine account creation date.","error")
+        log("Cannot determine account creation date.", "error")
         return
 
     try:
@@ -682,23 +797,23 @@ def farm_streak_safe(jwt, sub, user_info, delay_ms):
         if (datetime.now() - creation_dt).days > 5500:
             raise ValueError("Suspiciously large account age")
     except Exception as e:
-        log(f"Cannot parse creation date: {e}","error")
+        log(f"Cannot parse creation date: {e}", "error")
         return
 
     now_dt = datetime.now()
-    account_age_days= (now_dt - creation_dt).days
+    account_age_days = (now_dt - creation_dt).days
     current_streak = user_info.get("streak", 0)
     max_safe = account_age_days
 
     print()
-    log(f"Account created : {green(creation_dt.strftime('%Y-%m-%d'))}","stat")
-    log(f"Account age : {green(str(account_age_days))} days","stat")
-    log(f"Current streak : {yellow(str(current_streak))} days","stat")
-    log(f"Max safe streak : {green(str(max_safe))} days","stat")
+    log(f"Account created : {green(creation_dt.strftime('%Y-%m-%d'))}", "stat")
+    log(f"Account age     : {green(str(account_age_days))} days", "stat")
+    log(f"Current streak  : {yellow(str(current_streak))} days", "stat")
+    log(f"Max safe streak : {green(str(max_safe))} days", "stat")
     print()
 
     if current_streak >= max_safe:
-        log(f"Already at max safe streak ({current_streak}/{max_safe})!","success")
+        log(f"Already at max safe streak ({current_streak}/{max_safe})!", "success")
         return
 
     to_farm = max_safe - current_streak
@@ -708,82 +823,121 @@ def farm_streak_safe(jwt, sub, user_info, delay_ms):
         f" [dim]Ctrl+C to stop anytime[/dim]",
     ], title=" Safe Streak Farm", color="bright_green")
     print()
-    if _con.input(f" [yellow]Confirm? (y/N):[/yellow]").strip().lower() !="y":
-        log("Cancelled.","info")
+    if _con.input(f" [yellow]Confirm? (y/N):[/yellow]").strip().lower() != "y":
+        log("Cancelled.", "info")
         return
+
+    # Base date: use streakData.currentStreak.startDate if available, else today
+    streak_data = user_info.get("streakData", {})
+    date_str = (streak_data.get("currentStreak") or {}).get("startDate", "")
+    if date_str and len(date_str) >= 10:
+        try:
+            base_y, base_m, base_d = [int(x) for x in date_str[:10].split("-")]
+        except ValueError:
+            base_y, base_m, base_d = now_dt.year, now_dt.month, now_dt.day
+    else:
+        base_y, base_m, base_d = now_dt.year, now_dt.month, now_dt.day
 
     state.running = True
     state.start_time = time.time()
-    farm_ts = int(creation_dt.timestamp())
-    end_ts = int(now_dt.timestamp())
-    farmed = 0
+    streak_failures = 0
+    MAX_FAILURES = 5
+    day_idx = 0
     tick = 0
 
     print()
-    while state.running and farm_ts <= end_ts and farmed < to_farm:
+    while state.running and day_idx < to_farm:
         tick += 1
-        ok = _streak_session_once(jwt, sub, user_info, farm_ts, farm_ts + 60)
+        # endTime = noon of (base - 1 - day_idx), startTime = endTime - 1
+        target_y, target_m, target_d = _date_add_days(base_y, base_m, base_d, -(1 + day_idx))
+        end_ts = _tz_noon_timestamp(target_y, target_m, target_d)
+
+        ok = _streak_session_once(jwt, sub, user_info, end_ts)
         if ok:
-            farm_ts += 86400
-            farmed += 1
+            streak_failures = 0
+            day_idx += 1
             state.streak_farmed += 1
             current_streak += 1
             state.calls += 1
-            pct = farmed / to_farm
+            pct = day_idx / to_farm
             bar = green("█" * int(30 * pct)) + dim("░" * (30 - int(30 * pct)))
-            print(f"\r {spinner_char(tick)} [{bar}]"
-                  f"{bold(f'{farmed}/{to_farm}')} {bold(str(current_streak))} days"
+            print(f"\r {spinner_char(tick)} [{bar}] "
+                  f"{bold(f'{day_idx}/{to_farm}')}  streak {bold(str(current_streak))} days  "
                   f"Time: {dim(state.elapsed())}", end="", flush=True)
         else:
+            streak_failures += 1
             state.errors += 1
-            time.sleep(1)
+            if streak_failures >= MAX_FAILURES:
+                log("\nToo many failures — stopping streak farm.", "error")
+                break
+            time.sleep(2.0)
             continue
+
         time.sleep(delay_ms / 1000)
 
     state.running = False
     print()
-    _farm_summary("Streak (Safe)", state.streak_farmed," days")
+    _farm_summary("Streak (Safe)", state.streak_farmed, " days")
 
 def farm_streak_normal(jwt, sub, user_info, delay_ms):
-    """Farm streak backwards from current streak start — normal mode (higher risk).
-    Mirrors farmStreakNormal from DuoHacker userscript."""
+    """Farm streak — normal (infinite) mode matching DuoHacker V1 streak farm.
+    Uses timezone-aware noon timestamps: endTime = noon of (base - 1 - dayIdx).
+    """
     print()
-    log(f"[bright_red]WARNING:[/bright_red] Normal mode has higher ban risk!","warning")
-    if _con.input(f" [yellow]Confirm? (y/N):[/yellow]").strip().lower() !="y":
-        log("Cancelled.","info")
+    log(f"[bright_red]WARNING:[/bright_red] Normal mode has higher ban risk!", "warning")
+    if _con.input(f" [yellow]Confirm? (y/N):[/yellow]").strip().lower() != "y":
+        log("Cancelled.", "info")
         return
 
+    now_dt = datetime.now()
+
+    # Base date: use streakData.currentStreak.startDate if available
     streak_data = user_info.get("streakData", {})
-    has_streak = bool(streak_data.get("currentStreak"))
-    if has_streak:
-        start_date = streak_data["currentStreak"].get("startDate", datetime.now().isoformat())
-        start_ts = int(datetime.fromisoformat(str(start_date).split("T")[0]).timestamp())
-        farm_ts = start_ts - 86400
+    date_str = (streak_data.get("currentStreak") or {}).get("startDate", "")
+    if date_str and len(date_str) >= 10:
+        try:
+            base_y, base_m, base_d = [int(x) for x in date_str[:10].split("-")]
+        except ValueError:
+            base_y, base_m, base_d = now_dt.year, now_dt.month, now_dt.day
     else:
-        farm_ts = int(datetime.now().timestamp())
+        base_y, base_m, base_d = now_dt.year, now_dt.month, now_dt.day
 
     state.running = True
     state.start_time = time.time()
+    streak_failures = 0
+    MAX_FAILURES = 5
+    day_idx = 0
     tick = 0
 
     print()
     while state.running:
         tick += 1
-        ok = _streak_session_once(jwt, sub, user_info, farm_ts, farm_ts + 60)
+        target_y, target_m, target_d = _date_add_days(base_y, base_m, base_d, -(1 + day_idx))
+        end_ts = _tz_noon_timestamp(target_y, target_m, target_d)
+
+        ok = _streak_session_once(jwt, sub, user_info, end_ts)
         if ok:
-            farm_ts -= 86400
+            streak_failures = 0
+            day_idx += 1
             state.streak_farmed += 1
             state.calls += 1
             current = user_info.get("streak", 0) + state.streak_farmed
-            print(f"\r {spinner_char(tick)} Streak: {bold(str(current))} │"
-                  f"Farmed: {bold(str(state.streak_farmed))} │"
+            print(f"\r {spinner_char(tick)} Streak: {bold(str(current))} │ "
+                  f"Farmed: {bold(str(state.streak_farmed))} │ "
                   f"Time: {dim(state.elapsed())}", end="", flush=True)
         else:
+            streak_failures += 1
             state.errors += 1
+            if streak_failures >= MAX_FAILURES:
+                log("\nToo many failures — stopping streak farm.", "error")
+                break
+            time.sleep(2.0)
+            continue
+
         time.sleep(delay_ms / 1000)
 
     print()
-    _farm_summary("Streak (Normal)", state.streak_farmed," days")
+    _farm_summary("Streak (Normal)", state.streak_farmed, " days")
 
 # ─── Mixed Farm ──────────────────────────────────────────────────
 def farm_mixed(jwt, sub, user_info, delay_ms):
@@ -803,21 +957,26 @@ def farm_mixed(jwt, sub, user_info, delay_ms):
         tick += 1
         # XP call
         if use_stories:
-            status = farm_xp_once_stories(jwt, sub, user_info)
+            status, awarded = farm_xp_once_stories(jwt, sub, user_info)
             if status == 200:
-                state.xp_earned += 499
+                state.xp_earned += awarded
             elif status == 429:
                 consecutive_429 += 1
-                if consecutive_429 >= 2: use_stories = False
+                if consecutive_429 >= 2:
+                    use_stories = False
             else:
                 use_stories = False
         elif skill_id:
             ok, earned = farm_xp_once_unit(jwt, sub, user_info, skill_id)
-            if ok: state.xp_earned += earned
+            if ok:
+                state.xp_earned += earned
 
-        # Gem call
-        ok, earned = farm_gem_once(jwt, sub, user_info)
-        if ok: state.gem_earned += earned
+        # Gem call — fetch dynamic rewards and claim one batch
+        rewards = _fetch_gem_rewards(jwt, sub)
+        if rewards:
+            for r in rewards:
+                if _exploit_gem_reward(jwt, sub, user_info, r["id"]):
+                    state.gem_earned += r.get("amount", 0)
 
         state.calls += 1
         xp_rate = state.xp_earned / max(1, time.time()-state.start_time) * 3600
@@ -839,49 +998,44 @@ def farm_mixed(jwt, sub, user_info, delay_ms):
 
 GOALS_API ="https://goals-api.duolingo.com"
 
-def _goals_headers(jwt, sub):
-    return {
-        "Content-Type":"application/json",
-        "Accept":"application/json; charset=UTF-8",
+def _goals_headers(jwt, sub=None):
+    """Headers for goals-api.duolingo.com — mirrors _goalHdrs from DuoHacker."""
+    h = {
+        "Content-Type": "application/json",
+        "Accept": "application/json; charset=UTF-8",
         "Authorization": f"Bearer {jwt}",
-        "x-requested-with":"XMLHttpRequest",
-        "x-amzn-trace-id": f"User={sub}",
+        "x-requested-with": "XMLHttpRequest",
     }
+    if sub:
+        h["x-amzn-trace-id"] = f"User={sub}"
+    return h
 
 def _get_quest_schema(jwt, sub):
+    """GET /schema — mirrors _getGoals from DuoHacker. Goals-api is separate host."""
     headers = _goals_headers(jwt, sub)
-    tz ="UTC"
-    try:
-        import time as _t
-        tz_offset = -(_t.timezone if _t.daylight == 0 else _t.altzone) // 60
-        sign ="+" if tz_offset >= 0 else"-"
-        tz = f"UTC{sign}{abs(tz_offset)//60:02d}:{abs(tz_offset)%60:02d}"
-    except:
-        pass
-    status, data = duo_get(f"/schema?ui_language=en&_={int(time.time()*1000)}", jwt, sub)
-    # goals-api is a different host — use http_request directly
-    status, text = http_request("GET","goals-api.duolingo.com",
+    status, text = http_request("GET", "goals-api.duolingo.com",
                                 f"/schema?ui_language=en&_={int(time.time()*1000)}",
                                 headers)
     try:
         return json.loads(text)
-    except:
+    except Exception:
         return None
 
 def _get_quest_progress(jwt, sub):
+    """GET /users/{sub}/progress — mirrors _getProgress from DuoHacker."""
     headers = _goals_headers(jwt, sub)
+    tz = "UTC"
     try:
-        import time as _t
-        tz_offset = -(_t.timezone if _t.daylight == 0 else _t.altzone) // 60
-        sign ="+" if tz_offset >= 0 else"-"
+        tz_offset = -(time.timezone if time.daylight == 0 else time.altzone) // 60
+        sign = "+" if tz_offset >= 0 else "-"
         tz = f"UTC{sign}{abs(tz_offset)//60:02d}:{abs(tz_offset)%60:02d}"
-    except:
-        tz ="UTC"
+    except Exception:
+        pass
     path = f"/users/{sub}/progress?timezone={urllib.parse.quote(tz)}&ui_language=en"
-    status, text = http_request("GET","goals-api.duolingo.com", path, headers)
+    status, text = http_request("GET", "goals-api.duolingo.com", path, headers)
     try:
         return json.loads(text)
-    except:
+    except Exception:
         return None
 
 def _brute_force_quests(jwt, sub, metrics):
@@ -945,14 +1099,17 @@ def auto_daily_quest(jwt, sub, user_info):
 LEADERBOARD_URL = ("https://duolingo-leaderboards-prod.duolingo.com"
                    "/leaderboards/7d9f5dd1-8423-491a-91f2-2532052038ce")
 
-def _get_league_rank(jwt, sub):
-    """Returns (rank, my_score, gap_to_top) or None on error."""
+def _get_league_rank(jwt, sub, target_rank=1):
+    """Returns (rank, my_score, target_score, gap_to_target) or None on error.
+    target_score = score of person at (target_rank - 1) + 50, mirrors DuoHacker _farmLeague.
+    Also includes get_reactions=true header as in DuoHacker.
+    """
     headers = make_headers(jwt, sub)
-    headers["Host"] ="duolingo-leaderboards-prod.duolingo.com"
+    headers["Host"] = "duolingo-leaderboards-prod.duolingo.com"
     status, text = http_request(
-        "GET","duolingo-leaderboards-prod.duolingo.com",
+        "GET", "duolingo-leaderboards-prod.duolingo.com",
         f"/leaderboards/7d9f5dd1-8423-491a-91f2-2532052038ce"
-        f"/users/{sub}?client_unlocked=true&_={int(time.time()*1000)}",
+        f"/users/{sub}?client_unlocked=true&get_reactions=true&_={int(time.time()*1000)}",
         headers
     )
     try:
@@ -962,12 +1119,16 @@ def _get_league_rank(jwt, sub):
             return None
         my_data = next((u for u in rankings if str(u.get("user_id")) == str(sub)), None)
         if not my_data:
-            return None
+            return None  # not in a league
         rank = rankings.index(my_data) + 1
-        my_score= my_data["score"]
-        gap = (rankings[0]["score"] - my_score) if rank > 1 else (my_score - rankings[1]["score"] if len(rankings) > 1 else 9999)
-        return rank, my_score, gap
-    except:
+        my_score = my_data["score"]
+        # DuoHacker: aboveIdx = targetRank - 2 (0-based index of person at rank targetRank-1)
+        above_idx = target_rank - 2
+        above_person = rankings[above_idx] if 0 <= above_idx < len(rankings) else None
+        target_score = (above_person["score"] + 50) if above_person else 50
+        gap_to_target = max(0, target_score - my_score)
+        return rank, my_score, target_score, gap_to_target
+    except Exception:
         return None
 
 def farm_league(jwt, sub, user_info, delay_ms):
@@ -978,35 +1139,49 @@ def farm_league(jwt, sub, user_info, delay_ms):
     state.start_time = time.time()
     tick = 0
 
+    join_attempt_count = 0
+    consecutive_failures = 0
     print()
     while state.running:
         tick += 1
-        result = _get_league_rank(jwt, sub)
+        result = _get_league_rank(jwt, sub, target_rank=1)
         if result is None:
-            log("Could not fetch leaderboard. Are you in a league?","error")
-            break
-
-        rank, my_score, gap = result
-
-        if rank == 1:
-            if gap > 1000:
-                log(f" Rank 1 secured! Gap: {gap} XP — stopping.","success")
-                break
+            # Not in a league — try joining via a story XP call (same as DuoHacker _joinLeague)
+            if join_attempt_count == 0:
+                log("Not in a league — attempting to join via story XP...", "info")
+                farm_xp_once_stories(jwt, sub, user_info)
+                join_attempt_count += 1
+                time.sleep(3.0)
+                continue
+            elif join_attempt_count < 5:
+                join_attempt_count += 1
+                farm_xp_once_stories(jwt, sub, user_info)
+                time.sleep(3.0)
+                continue
             else:
-                print(f"\r {spinner_char(tick)} Rank: [bold]1[/bold]"
-                      f"Gap above #2: {yellow(str(gap))} XP"
-                      f"Score: {blue(str(my_score))}"
-                      f"Time: {dim(state.elapsed())}", end="", flush=True)
+                log("Could not join a league after several attempts.", "error")
+                break
+        join_attempt_count = 0
+        consecutive_failures += 1 if result is None else 0
+        consecutive_failures = 0
+
+        rank, my_score, target_score, gap_to_target = result
+
+        # DuoHacker: stop when rank <= 1 OR score >= targetScore (score of #0 + 50)
+        if rank <= 1 or my_score >= target_score:
+            log(f" Rank {rank} reached! Score: {my_score} — stopping.", "success")
+            break
         else:
-            print(f"\r {spinner_char(tick)} Rank: {red(str(rank))}"
-                  f"Gap to #1: {yellow(str(gap))} XP"
-                  f"Score: {blue(str(my_score))}"
+            print(f"\r {spinner_char(tick)} Rank: {red(str(rank))}  "
+                  f"Gap to #1: {yellow(str(gap_to_target))} XP  "
+                  f"Score: {blue(str(my_score))}  "
+                  f"Target: {cyan(str(target_score))}  "
                   f"Time: {dim(state.elapsed())}", end="", flush=True)
 
         # Farm one stories XP cycle
-        status = farm_xp_once_stories(jwt, sub, user_info)
+        status, awarded = farm_xp_once_stories(jwt, sub, user_info)
         if status == 200:
-            state.xp_earned += 499
+            state.xp_earned += awarded
             state.calls += 1
         elif status == 429:
             time.sleep(60)
@@ -1518,11 +1693,12 @@ def _gen_complete_lesson(duo_id, jwt):
 def _gen_farm_stories(duo_id, jwt, count=10):
     """POST stories complete ×count — mirrors DuoXPy Dex farmStoriesXP."""
     headers = {
-        "accept":"application/json",
+        "accept": "application/json",
         "authorization": f"Bearer {jwt}",
-        "content-type":"application/json",
+        "content-type": "application/json",
         "host": GENERATE_STORIES_HOST,
-        "origin":"https://stories.duolingo.com",
+        "origin": "https://stories.duolingo.com",
+        "referer": "https://stories.duolingo.com/",
         "user-agent": _gen_mobile_ua(),
         "x-amzn-trace-id": f"User={duo_id}",
     }
@@ -1533,18 +1709,18 @@ def _gen_farm_stories(duo_id, jwt, count=10):
         payload = {
             "awardXp": True,
             "completedBonusChallenge": True,
-            "fromLanguage":"en",
+            "fromLanguage": "fr",       # hardcoded — matches slug fr-en-le-passeport
+            "learningLanguage": "en",   # hardcoded — matches slug fr-en-le-passeport
             "hasXpBoost": False,
-            "illustrationFormat":"svg",
+            "illustrationFormat": "svg",
             "isFeaturedStoryInPracticeHub": True,
             "isLegendaryMode": True,
             "isV2Redo": False,
             "isV2Story": False,
-            "learningLanguage":"fr",
             "masterVersion": True,
             "maxScore": 0,
             "score": 0,
-            "happyHourBonusXp": random.randint(0, 465),
+            "happyHourBonusXp": 469,
             "startTime": now,
             "endTime": now + random.randint(300, 420),
         }
@@ -2265,9 +2441,9 @@ def _multi_xp_worker(acc, st, delay_ms, stagger_s):
     while st.is_running():
         try:
             if use_stories and consecutive_429 < MAX_429:
-                status = farm_xp_once_stories(jwt, sub, info)
+                status, awarded = farm_xp_once_stories(jwt, sub, info)
                 if status == 200:
-                    st.add_xp(499)
+                    st.add_xp(awarded)
                     consecutive_429 = 0
                     st.set_status("ok")
                 elif status == 429:
@@ -2305,28 +2481,43 @@ def _multi_xp_worker(acc, st, delay_ms, stagger_s):
 
 
 def _multi_gems_worker(acc, st, delay_ms, stagger_s):
-    """Gem farm thread for one account."""
+    """Gem farm thread for one account — uses dynamic rewardBundles fetch."""
     time.sleep(stagger_s)
     jwt  = acc["jwt"]
     sub  = acc["sub"]
     info = acc.get("info", {})
+    consecutive_errors = 0
 
     while st.is_running():
         try:
-            ok, earned = farm_gem_once(jwt, sub, info)
-            if ok:
-                st.add_gems(earned)
-                st.set_status("ok")
-            else:
+            rewards = _fetch_gem_rewards(jwt, sub)
+            if rewards is None:
+                consecutive_errors += 1
                 st.add_error()
                 st.set_status("err")
-                if st.errors >= 5:
+                if consecutive_errors >= 5:
                     st.stop(); break
+                time.sleep(3.0)
+                continue
+            consecutive_errors = 0
+            if len(rewards) == 0:
+                time.sleep(max(0.2, delay_ms / 1000))
+                continue
+            batch_gained = 0
+            for r in rewards:
+                if _exploit_gem_reward(jwt, sub, info, r["id"]):
+                    batch_gained += r.get("amount", 0)
+                time.sleep(0.1)
+            if batch_gained > 0:
+                st.add_gems(batch_gained)
+                st.set_status("ok")
         except Exception:
+            consecutive_errors += 1
             st.add_error()
-            if st.errors >= 5:
+            if consecutive_errors >= 5:
                 st.stop(); break
-        time.sleep(delay_ms / 1000)
+        cooldown = max(0.05, delay_ms / 1000 / 4) if delay_ms > 80 else 0.05
+        time.sleep(cooldown)
 
 
 def _multi_mixed_worker(acc, st, delay_ms, stagger_s):
@@ -2340,9 +2531,9 @@ def _multi_mixed_worker(acc, st, delay_ms, stagger_s):
     while st.is_running():
         try:
             if use_xp:
-                status = farm_xp_once_stories(jwt, sub, info)
+                status, awarded = farm_xp_once_stories(jwt, sub, info)
                 if status == 200:
-                    st.add_xp(499); st.set_status("ok")
+                    st.add_xp(awarded); st.set_status("ok")
                 elif status == 429:
                     st.set_status("429")
                 else:
@@ -2350,8 +2541,12 @@ def _multi_mixed_worker(acc, st, delay_ms, stagger_s):
                         ok, earned = farm_xp_once_unit(jwt, sub, info, skill_id)
                         if ok: st.add_xp(earned); st.set_status("ok")
             else:
-                ok, earned = farm_gem_once(jwt, sub, info)
-                if ok: st.add_gems(earned); st.set_status("ok")
+                rewards = _fetch_gem_rewards(jwt, sub)
+                if rewards:
+                    for r in rewards:
+                        if _exploit_gem_reward(jwt, sub, info, r["id"]):
+                            st.add_gems(r.get("amount", 0))
+                    st.set_status("ok")
             use_xp = not use_xp
         except Exception:
             st.add_error()
